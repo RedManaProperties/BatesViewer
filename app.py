@@ -1,82 +1,85 @@
 import streamlit as st
 import pandas as pd
 from io import StringIO
+import re
 
 # The delimiter used in your Bates file format
 DELIMITER = 'þ'
 
 def parse_bates_file(uploaded_file):
     """
-    Reads the uploaded file using a robust method to handle the delimiter,
-    cleans up column names (removes BOM and surrounding delimiters),
-    and returns a DataFrame.
+    Reads the uploaded file, manually parses the delimited data, 
+    cleans up headers and rows, and returns a DataFrame.
     """
     try:
-        # Read the file content and replace multiple delimiters with a single one
+        # Read the file content as a single string
         file_content = uploaded_file.getvalue().decode('utf-8')
         
-        # Replace the Windows Byte Order Mark (BOM) if present, as it can cause duplicate columns
-        file_content = file_content.lstrip('\ufeff')
-
-        # Since the field names and values are enclosed in 'þ' and separated by it,
-        # we can't use the regular CSV reader that expects fields separated by commas/tabs.
-        # We need to manually split and strip.
+        # Remove Byte Order Mark (BOM) and non-standard field separator (\x14)
+        file_content = file_content.lstrip('\ufeff').replace('\x14', '')
         
         # Split into lines
         lines = file_content.split('\n')
-        
-        # Filter out empty lines
+        # Filter out purely empty lines
         data_lines = [line.strip() for line in lines if line.strip()]
 
         if not data_lines:
             return pd.DataFrame()
 
-        # The raw header is the first line
-        raw_header = data_lines[0]
+        # 1. Process Header
+        # Determine the header lines (assuming it's the first few lines until 'Native Link' is seen)
+        header_end_index = 0
+        for i, line in enumerate(data_lines):
+            # We look for the last column name, 'Native Link'
+            if 'Native Link' in line:
+                header_end_index = i
+                break
         
-        # Split by the delimiter 'þ', keep all parts (including empty ones for blank columns)
-        # Remove empty strings at the start/end from the split operation
-        raw_columns = [col.strip() for col in raw_header.split(DELIMITER)]
-        if raw_columns[0] == '':
-            raw_columns.pop(0)
-        if raw_columns[-1] == '':
-            raw_columns.pop(-1)
+        # Join header lines (handling the multiline column name "Original Folder Path")
+        header_text = "".join(data_lines[:header_end_index + 1])
         
-        # The cleaned header names are the raw column names stripped of extra control characters
-        # The original problem was from internal tool characters, not the surrounding 'þ'
-        header = [col.strip() for col in raw_columns]
+        # Clean up the known multi-line header issue
+        header_text = header_text.replace('Original \nFolder Path', 'Original Folder Path')
 
-        # Process data rows
+        # Split by the delimiter 'þ'. The structure is 'þCol1þ þCol2þ...', 
+        # so splitting creates an empty string at the start and around the ' þ' separators.
+        raw_header_parts = [p.strip() for p in header_text.split(DELIMITER)]
+        
+        # Filter out empty strings and strings consisting only of spaces, which are the separators.
+        header = [p for p in raw_header_parts if p and not p.isspace()]
+        
+        # 2. Process Data Rows
         parsed_data = []
-        for line in data_lines[1:]:
-            # Split by delimiter, remove empty strings at the start/end from the split operation
+        expected_len = len(header)
+        
+        for line in data_lines[header_end_index + 1:]:
+            # Split by delimiter. Rows start with 'þ' so splitting yields ['', 'Val1', 'Val2', ...]
             row_values = [v.strip() for v in line.split(DELIMITER)]
-            if row_values[0] == '':
+            
+            # Remove leading/trailing empty strings from the row split
+            if row_values and row_values[0] == '':
                 row_values.pop(0)
-            if row_values[-1] == '':
+            if row_values and row_values[-1] == '':
                 row_values.pop(-1)
-            
-            # Pad or truncate to match the expected number of columns for robustness
-            if len(row_values) > len(header):
-                row_values = row_values[:len(header)]
-            elif len(row_values) < len(header):
-                row_values.extend([""] * (len(header) - len(row_values)))
-            
-            if len(row_values) == len(header):
-                # Replace the problematic control character '\x14' with an empty string or strip it
-                cleaned_row = [v.replace('\x14', '').strip() for v in row_values]
-                parsed_data.append(cleaned_row)
 
-        # Create the DataFrame
+            # Clean any remaining spaces/control chars and ensure length matches header
+            current_len = len(row_values)
+            
+            if current_len > expected_len:
+                row_values = row_values[:expected_len]
+            elif current_len < expected_len:
+                row_values.extend([""] * (expected_len - current_len))
+
+            if len(row_values) == expected_len:
+                parsed_data.append(row_values)
+
+        # Create DataFrame
         df = pd.DataFrame(parsed_data, columns=header)
         
-        # Clean up column names (remove all remaining control characters or spaces)
-        df.columns = [c.replace('\x14', '').strip() for c in df.columns]
-
         return df
 
     except Exception as e:
-        st.error(f"Error processing file: {e}")
+        st.error(f"An unexpected error occurred during parsing: {e}")
         return None
 
 # --- Streamlit UI ---
@@ -92,15 +95,15 @@ if uploaded_file is not None:
     df = parse_bates_file(uploaded_file)
 
     if df is not None and not df.empty:
-        st.success("File successfully parsed and loaded!")
+        st.success("File successfully parsed and loaded! The table columns have been properly identified.")
         
-        # Convert 'Pages' column to numeric, coercing errors to an appropriate format
+        # Convert 'Pages' column to numeric for better sorting/display, coercing errors
         if 'Pages' in df.columns:
-            # Errors='coerce' turns invalid parsing into NaN, fillna replaces NaN with 'N/A'
-            df['Pages'] = pd.to_numeric(df['Pages'], errors='coerce').fillna('N/A').astype(object)
+            df['Pages'] = pd.to_numeric(df['Pages'], errors='coerce').fillna('').astype(object)
             
-        # Display the interactive table, fixing the deprecation warning
-        st.dataframe(df, use_container_width=True)
+        # Display the interactive table, using the updated 'width' parameter
+        # to fix the deprecation warning/error:
+        st.dataframe(df, width='stretch')
         
         # Offer option to download the clean table as a CSV
         csv_data = df.to_csv(index=False).encode('utf-8')
