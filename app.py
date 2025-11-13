@@ -4,117 +4,169 @@ from io import StringIO
 import re
 import csv
 import string
+import os
 
-# The delimiter used in your Bates file format
+# --- Configuration ---
+# Set the default filename for automatic loading
+FIXED_FILENAME = 'HOUSE_OVERSIGHT_009.dat'
 DELIMITER = 'þ'
+
+# The definitive list of 28 core column headers, in the correct order.
+DEFINITIVE_HEADERS = [
+    'Bates Begin', 
+    'Bates End', 
+    'Bates Begin Attach', 
+    'Bates End Attach', 
+    'Attachment Document', 
+    'Pages', 
+    'Author', 
+    'Custodian/Source', 
+    'Date Created', 
+    'Date Last Modified', 
+    'Date Received', 
+    'Date Sent', 
+    'Time Sent', 
+    'Document Extension', 
+    'Email BCC', 
+    'Email CC', 
+    'Email From', 
+    'Email Subject/Title', 
+    'Email To', 
+    'Original Filename', 
+    'File Size', 
+    'Original Folder Path', 
+    'MD5 Hash', 
+    'Parent Document ID', 
+    'Document Title', 
+    'Time Zone', 
+    'Text Link', 
+    'Native Link' 
+]
 
 def generate_column_names(n):
     """Generates column names A, B, C, ..., AA, AB, etc."""
     names = []
     for i in range(n):
         name = ""
-        # Handle columns beyond Z (e.g., AA, AB)
-        while i >= 0:
-            name = string.ascii_uppercase[i % 26] + name
-            i = i // 26 - 1
+        temp_i = i
+        while temp_i >= 0:
+            name = string.ascii_uppercase[temp_i % 26] + name
+            temp_i = temp_i // 26 - 1
         names.append(name)
     return names
 
-def clean_and_load_data(uploaded_file):
+def parse_data_from_content(file_content, use_fixed_headers=False):
     """
-    Reads the file line-by-line, uses the csv module to split, 
-    and determines the column headers based on the largest row width encountered.
+    Parses the content line-by-line using the csv module to split, 
+    and handles dynamic vs. fixed headers.
     """
-    try:
-        # 1. Read and prepare content
-        file_content = uploaded_file.getvalue().decode('utf-8')
-        
-        # Remove Byte Order Mark (BOM) and non-standard separator \x14 globally
-        file_content = file_content.lstrip('\ufeff').replace('\x14', '')
-        
-        lines = file_content.split('\n')
-        
-        # Find the start of the actual data rows by looking for the last line of the header
-        data_start_index = 0
-        for i, line in enumerate(lines):
-            if 'Native Link' in line:
-                data_start_index = i + 1
-                break
-        
-        # 2. Process Data Rows to determine maximum column width
-        raw_data_lines = lines[data_start_index:]
-        
-        max_cols = 0
-        all_data_rows = []
-        
-        # Use csv.reader for reliable splitting based on the delimiter
-        reader = csv.reader(raw_data_lines, delimiter=DELIMITER)
-        
-        for row_values in reader:
-            if not row_values:
-                continue
-                
-            # Filter empty strings at the start/end of the list that result from the leading/trailing delimiter
-            cleaned_row = [v.strip() for v in row_values]
+    # Remove Byte Order Mark (BOM) and non-standard separator \x14 globally
+    file_content = file_content.lstrip('\ufeff').replace('\x14', '')
+    
+    lines = file_content.split('\n')
+    
+    # Find the start of the actual data rows
+    data_start_index = 0
+    for i, line in enumerate(lines):
+        if 'Native Link' in line:
+            data_start_index = i + 1
+            break
             
-            if cleaned_row and cleaned_row[0] == '':
-                cleaned_row.pop(0)
-            if cleaned_row and cleaned_row[-1] == '':
-                cleaned_row.pop(-1)
+    # Process only the data lines
+    raw_data_lines = lines[data_start_index:]
+    parsed_data = []
+    max_cols = 0
+    
+    # Use csv.reader for reliable splitting based on the delimiter
+    reader = csv.reader(raw_data_lines, delimiter=DELIMITER)
+    
+    for row_values in reader:
+        if not row_values:
+            continue
             
-            row_len = len(cleaned_row)
-            
-            # Track the widest row to define all headers
-            if row_len > max_cols:
-                max_cols = row_len
-                
-            all_data_rows.append(cleaned_row)
-            
-        if max_cols == 0:
-            raise Exception("No columns detected or no data rows found.")
-
-        # 3. Standardize and pad all rows to the maximum width
-        for row in all_data_rows:
-            if len(row) < max_cols:
-                row.extend([""] * (max_cols - len(row)))
-            # Truncation is unnecessary if max_cols is the max detected length
-            
-        # 4. Create Generic Headers
-        generic_headers = generate_column_names(max_cols)
-
-        # 5. Create DataFrame
-        df = pd.DataFrame(all_data_rows, columns=generic_headers)
+        cleaned_row = [v.strip() for v in row_values]
         
-        return df
+        # Remove empty strings that result from the leading and trailing delimiter
+        if cleaned_row and cleaned_row[0] == '':
+            cleaned_row.pop(0)
+        if cleaned_row and cleaned_row[-1] == '':
+            cleaned_row.pop(-1)
+        
+        # Track the widest row
+        max_cols = max(max_cols, len(cleaned_row))
+        parsed_data.append(cleaned_row)
 
-    except Exception as e:
-        st.error(f"An unexpected error occurred during parsing: {e}")
-        return None
+    if max_cols == 0 and parsed_data:
+        raise Exception("Failed to extract meaningful columns from data rows.")
+    elif max_cols == 0 and not parsed_data:
+        return pd.DataFrame()
 
-# --- Streamlit UI ---
-st.set_page_config(layout="wide")
+    # Standardize and pad all rows to the maximum width observed
+    for row in parsed_data:
+        if len(row) < max_cols:
+            row.extend([""] * (max_cols - len(row)))
+        elif len(row) > max_cols:
+            row[:] = row[:max_cols]
 
-st.title("📂 Bates File Viewer (Generic Headers)")
-st.markdown("This view uses simple letter headers to ensure maximum column alignment. Inspect columns carefully to see data relationships.")
+    # Create headers based on the desired mode
+    if use_fixed_headers and max_cols <= len(DEFINITIVE_HEADERS):
+        headers_to_use = DEFINITIVE_HEADERS[:max_cols]
+    else:
+        # Fallback to generic headers if the length is unexpected or fixed headers aren't used
+        headers_to_use = generate_column_names(max_cols)
 
-uploaded_file = st.file_uploader("Choose a .dat or delimited file", type=['dat', 'txt', 'csv'])
+    # Create the DataFrame
+    df = pd.DataFrame(parsed_data, columns=headers_to_use)
+    
+    # Post-processing clean-up
+    if 'Pages' in df.columns:
+        df['Pages'] = pd.to_numeric(df['Pages'], errors='coerce').fillna('').astype(object)
+    
+    # Drop columns that are entirely empty across all rows 
+    df = df.dropna(axis=1, how='all')
+    
+    return df
 
-if uploaded_file is not None:
-    df = clean_and_load_data(uploaded_file)
+def main():
+    st.set_page_config(layout="wide")
+    st.title("📂 Bates File Viewer (Auto-Load & Upload)")
 
+    df = None
+    source_info = ""
+
+    # 1. Try to automatically load the local file
+    file_path = os.path.join(os.getcwd(), FIXED_FILENAME)
+    
+    if os.path.exists(file_path):
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                file_content = f.read()
+            
+            df = parse_data_from_content(file_content, use_fixed_headers=True)
+            source_info = f"**Loaded automatically:** `{FIXED_FILENAME}`. To process a different file, upload below."
+            
+        except Exception as e:
+            st.warning(f"⚠️ Auto-load failed for `{FIXED_FILENAME}`. Error: {e}")
+            st.info("The local file could not be parsed. Please use the uploader below.")
+
+    # 2. File Uploader for override or initial load if auto-load failed
+    uploaded_file = st.sidebar.file_uploader("Upload a replacement .dat or delimited file", type=['dat', 'txt', 'csv'])
+
+    if uploaded_file is not None:
+        # If a file is uploaded, use it instead
+        file_content_upload = uploaded_file.getvalue().decode('utf-8')
+        df = parse_data_from_content(file_content_upload, use_fixed_headers=False)
+        source_info = f"**Currently loaded:** `{uploaded_file.name}`. Headers use generic letters for guaranteed alignment."
+
+    # --- Display Results ---
     if df is not None and not df.empty:
-        st.success(f"File successfully parsed and loaded with {df.shape[1]} columns. Columns are aligned by delimiter position.")
+        st.markdown(source_info)
+        st.success(f"File successfully parsed and loaded with {df.shape[1]} columns. **Note: Generic column headers are used for uploaded files to guarantee alignment.**")
         
-        # Data Cleaning for Presentation (No explicit 'Pages' column name needed)
-        
-        # Drop columns that are entirely empty across all rows 
-        # (Often necessary in Bates files to remove empty placeholder columns)
-        df = df.dropna(axis=1, how='all')
-
-        # Display the interactive table, using the correct 'width' parameter
+        # Display the interactive table
         st.dataframe(df, width='stretch')
         
-        # Offer option to download the clean table as a CSV
+        # Offer download option
         csv_data = df.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="Download Clean Data as CSV",
@@ -122,5 +174,11 @@ if uploaded_file is not None:
             file_name='parsed_bates_data_aligned.csv',
             mime='text/csv',
         )
-    elif df is not None and df.empty:
-        st.warning("The file was processed, but no data rows were found.")
+    elif os.path.exists(file_path) and df is None:
+        # Display message if local file exists but failed to parse and no upload happened
+        st.warning(f"Could not parse `{FIXED_FILENAME}`. Please try uploading a file in the sidebar.")
+    else:
+        st.info("Please upload a Bates `.dat` file using the sidebar uploader to begin analysis.")
+
+if __name__ == '__main__':
+    main()
