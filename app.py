@@ -1,85 +1,111 @@
 import streamlit as st
 import pandas as pd
 from io import StringIO
-import re
 
 # The delimiter used in your Bates file format
 DELIMITER = 'þ'
 
-def parse_bates_file(uploaded_file):
+# The definitive list of 31 column headers, in the correct order,
+# based on the standard Bates file specification.
+DEFINITIVE_HEADERS = [
+    'Bates Begin', 
+    'Bates End', 
+    'Bates Begin Attach', 
+    'Bates End Attach', 
+    'Attachment Document', 
+    'Pages', 
+    'Author', 
+    'Custodian/Source', 
+    'Date Created', 
+    'Date Last Modified', 
+    'Date Received', 
+    'Date Sent', 
+    'Time Sent', 
+    'Document Extension', 
+    'Email BCC', 
+    'Email CC', 
+    'Email From', 
+    'Email Subject/Title', 
+    'Email To', 
+    'Original Filename', 
+    'File Size', 
+    # This header spanned two lines in the original file source, which is why parsing broke
+    'Original Folder Path', 
+    'MD5 Hash', 
+    'Parent Document ID', 
+    'Document Title', 
+    'Time Zone', 
+    'Text Link', 
+    'Native Link' 
+    # The actual file provided seems to have 28, 29 or 31 fields depending on parsing method
+    # Sticking to the most important metadata fields visible in the original text structure:
+]
+
+def clean_and_load_data(uploaded_file):
     """
-    Reads the uploaded file, manually parses the delimited data, 
-    cleans up headers and rows, and returns a DataFrame.
+    Reads the file, standardizes delimiters, and loads into a DataFrame 
+    using the definitive column headers.
     """
     try:
         # Read the file content as a single string
         file_content = uploaded_file.getvalue().decode('utf-8')
         
-        # Remove Byte Order Mark (BOM) and non-standard field separator (\x14)
+        # 1. Clean data of unwanted characters and replace the messy delimiter pattern
+        # Remove BOM and non-standard separator \x14
         file_content = file_content.lstrip('\ufeff').replace('\x14', '')
         
-        # Split into lines
-        lines = file_content.split('\n')
-        # Filter out purely empty lines
-        data_lines = [line.strip() for line in lines if line.strip()]
+        # Replace the multiple-space-separated delimiter pattern (þ...þ ... þ) 
+        # with a simple single tab character for robust CSV reading.
+        # This regex replaces the pattern "þ[spaces]þ" with "TAB".
+        cleaned_content = re.sub(r'þ\s*þ', '\t', file_content)
 
-        if not data_lines:
-            return pd.DataFrame()
+        # Remove the first/last delimiters and any trailing spaces/tabs
+        cleaned_content = cleaned_content.strip(DELIMITER).strip()
 
-        # 1. Process Header
-        # Determine the header lines (assuming it's the first few lines until 'Native Link' is seen)
-        header_end_index = 0
-        for i, line in enumerate(data_lines):
-            # We look for the last column name, 'Native Link'
-            if 'Native Link' in line:
-                header_end_index = i
-                break
+        # 2. Re-read into pandas using the cleaned content and known headers
+        # We use a space as the delimiter since the original delimiter was removed.
+        # And let the parser split the rows by tabs created above.
+        data = StringIO(cleaned_content)
         
-        # Join header lines (handling the multiline column name "Original Folder Path")
-        header_text = "".join(data_lines[:header_end_index + 1])
-        
-        # Clean up the known multi-line header issue
-        header_text = header_text.replace('Original \nFolder Path', 'Original Folder Path')
+        df = pd.read_csv(
+            data,
+            sep='\t', 
+            engine='python',
+            # Skip the header rows (first 3 lines in the source document)
+            skiprows=[0, 1, 2],
+            # Do not allow pandas to infer headers; we supply them later
+            header=None,
+            # Handle empty lines that might still be present
+            skip_blank_lines=True
+        )
 
-        # Split by the delimiter 'þ'. The structure is 'þCol1þ þCol2þ...', 
-        # so splitting creates an empty string at the start and around the ' þ' separators.
-        raw_header_parts = [p.strip() for p in header_text.split(DELIMITER)]
+        # 3. Assign the correct, pre-defined headers
+        # We need to manually check how many data columns we actually got
+        num_columns = df.shape[1]
         
-        # Filter out empty strings and strings consisting only of spaces, which are the separators.
-        header = [p for p in raw_header_parts if p and not p.isspace()]
+        # The true headers are located in the last few rows of the original file (rows 0, 1, 2).
+        # To simplify, we will manually define them and trim/expand to match the data length.
         
-        # 2. Process Data Rows
-        parsed_data = []
-        expected_len = len(header)
-        
-        for line in data_lines[header_end_index + 1:]:
-            # Split by delimiter. Rows start with 'þ' so splitting yields ['', 'Val1', 'Val2', ...]
-            row_values = [v.strip() for v in line.split(DELIMITER)]
-            
-            # Remove leading/trailing empty strings from the row split
-            if row_values and row_values[0] == '':
-                row_values.pop(0)
-            if row_values and row_values[-1] == '':
-                row_values.pop(-1)
+        # The definitive list based on 31 expected columns (including the 3 empty columns for attachments metadata)
+        master_headers = [
+            'Bates Begin', 'Bates End', 'Bates Begin Attach', 'Bates End Attach', 
+            'Attachment Document', 'Pages', 'Author', 'Custodian/Source', 
+            'Date Created', 'Date Last Modified', 'Date Received', 'Date Sent', 
+            'Time Sent', 'Document Extension', 'Email BCC', 'Email CC', 
+            'Email From', 'Email Subject/Title', 'Email To', 'Original Filename', 
+            'File Size', 'Original Folder Path', 'MD5 Hash', 'Parent Document ID', 
+            'Document Title', 'Time Zone', 'Text Link', 'Native Link', 
+            # Placeholders for any unexpected columns if present in data
+            'Col_29', 'Col_30', 'Col_31'
+        ]
 
-            # Clean any remaining spaces/control chars and ensure length matches header
-            current_len = len(row_values)
-            
-            if current_len > expected_len:
-                row_values = row_values[:expected_len]
-            elif current_len < expected_len:
-                row_values.extend([""] * (expected_len - current_len))
-
-            if len(row_values) == expected_len:
-                parsed_data.append(row_values)
-
-        # Create DataFrame
-        df = pd.DataFrame(parsed_data, columns=header)
+        # Use only the necessary headers, then rename them based on the best fit:
+        df.columns = master_headers[:num_columns]
         
-        return df
+        return df.iloc[:, :len(DEFINITIVE_HEADERS)] # Select only the definitive columns
 
     except Exception as e:
-        st.error(f"An unexpected error occurred during parsing: {e}")
+        st.error(f"Error processing file: {e}")
         return None
 
 # --- Streamlit UI ---
@@ -92,17 +118,20 @@ uploaded_file = st.file_uploader("Choose a .dat or delimited file", type=['dat',
 
 if uploaded_file is not None:
     # Use the parsing function
-    df = parse_bates_file(uploaded_file)
+    df = clean_and_load_data(uploaded_file)
 
     if df is not None and not df.empty:
-        st.success("File successfully parsed and loaded! The table columns have been properly identified.")
+        st.success("File successfully parsed and loaded! The column order is now forced to match the expected format.")
         
-        # Convert 'Pages' column to numeric for better sorting/display, coercing errors
+        # Data Cleaning for Presentation
         if 'Pages' in df.columns:
+            # Convert 'Pages' to numeric, filling non-numeric with empty string
             df['Pages'] = pd.to_numeric(df['Pages'], errors='coerce').fillna('').astype(object)
             
-        # Display the interactive table, using the updated 'width' parameter
-        # to fix the deprecation warning/error:
+        # Drop columns that are empty (e.g., original empty attachment metadata fields)
+        df = df.dropna(axis=1, how='all')
+
+        # Display the interactive table, fixing the deprecation warning
         st.dataframe(df, width='stretch')
         
         # Offer option to download the clean table as a CSV
