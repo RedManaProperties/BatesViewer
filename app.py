@@ -129,7 +129,17 @@ def parse_data_from_content(file_content, use_fixed_headers=False):
 
 def main():
     st.set_page_config(layout="wide")
-    st.title("📂 Bates File Viewer (Auto-Load & Upload)")
+    st.title("📂 Bates File Viewer (Epstein Documents Index)")
+    
+    # --- New Information Note ---
+    st.info(
+        "📰 This viewer was created by Radio Free Hub City is set to automatically load the **latest Epstein file index in Bates format**, released on **11/12/2025**. "
+        "This table provides **metadata only**. To view the actual document files, find the corresponding filename in the table "
+        "and access the full release here: [https://oversight.house.gov/release/oversight-committee-releases-additional-epstein-estate-documents/](https://oversight.house.gov/release/oversight-committee-releases-additional-epstein-estate-documents/)"
+        "-"
+        "To view our latest coverage on this and other local and national news, visit [https://radiofreehubcity.com](https://radiofreehubcity.com)"
+    )
+    # ----------------------------
 
     df = None
     source_info = ""
@@ -142,26 +152,27 @@ def main():
             with open(file_path, 'r', encoding='utf-8') as f:
                 file_content = f.read()
             
+            # Use fixed headers for the known file
             df = parse_data_from_content(file_content, use_fixed_headers=True)
-            source_info = f"**Loaded automatically:** `{FIXED_FILENAME}`. To process a different file, upload below."
+            source_info = f"**Currently loaded:** `{FIXED_FILENAME}` (from local directory)."
             
         except Exception as e:
             st.warning(f"⚠️ Auto-load failed for `{FIXED_FILENAME}`. Error: {e}")
-            st.info("The local file could not be parsed. Please use the uploader below.")
+            st.info("The local file could not be parsed correctly. Please try uploading a file below.")
 
     # 2. File Uploader for override or initial load if auto-load failed
-    uploaded_file = st.sidebar.file_uploader("Upload a replacement .dat or delimited file", type=['dat', 'txt', 'csv'])
+    uploaded_file = st.sidebar.file_uploader("Upload an alternative .dat or delimited file", type=['dat', 'txt', 'csv'])
 
     if uploaded_file is not None:
-        # If a file is uploaded, use it instead
+        # If a file is uploaded, use it instead (and use generic headers for safety)
         file_content_upload = uploaded_file.getvalue().decode('utf-8')
         df = parse_data_from_content(file_content_upload, use_fixed_headers=False)
-        source_info = f"**Currently loaded:** `{uploaded_file.name}`. Headers use generic letters for guaranteed alignment."
+        source_info = f"**Currently loaded:** `{uploaded_file.name}` (uploaded). Headers use generic letters for guaranteed alignment."
 
     # --- Display Results ---
     if df is not None and not df.empty:
         st.markdown(source_info)
-        st.success(f"File successfully parsed and loaded with {df.shape[1]} columns. **Note: Generic column headers are used for uploaded files to guarantee alignment.**")
+        st.success(f"File parsed and loaded with {df.shape[1]} columns. ")
         
         # Display the interactive table
         st.dataframe(df, width='stretch')
