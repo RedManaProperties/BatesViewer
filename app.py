@@ -6,44 +6,72 @@ from io import StringIO
 DELIMITER = 'þ'
 
 def parse_bates_file(uploaded_file):
-    """Reads the uploaded .dat file, processes it, and returns a DataFrame."""
+    """
+    Reads the uploaded file using a robust method to handle the delimiter,
+    cleans up column names (removes BOM and surrounding delimiters),
+    and returns a DataFrame.
+    """
     try:
-        # Read the uploaded file content into a string
-        string_data = StringIO(uploaded_file.getvalue().decode('utf-8')).read()
+        # Read the file content and replace multiple delimiters with a single one
+        file_content = uploaded_file.getvalue().decode('utf-8')
         
-        # Split the entire string by the delimiter and filter out empty strings
-        data_rows = [row.strip() for row in string_data.split('\n') if row.strip()]
+        # Replace the Windows Byte Order Mark (BOM) if present, as it can cause duplicate columns
+        file_content = file_content.lstrip('\ufeff')
 
-        # The header is the first data row (columns separated by 'þ')
-        # We need to split, filter empty elements, and strip whitespace from column names
-        header = [col.strip() for col in data_rows[0].split(DELIMITER) if col.strip()]
+        # Since the field names and values are enclosed in 'þ' and separated by it,
+        # we can't use the regular CSV reader that expects fields separated by commas/tabs.
+        # We need to manually split and strip.
+        
+        # Split into lines
+        lines = file_content.split('\n')
+        
+        # Filter out empty lines
+        data_lines = [line.strip() for line in lines if line.strip()]
 
-        # Process the rest of the rows
+        if not data_lines:
+            return pd.DataFrame()
+
+        # The raw header is the first line
+        raw_header = data_lines[0]
+        
+        # Split by the delimiter 'þ', keep all parts (including empty ones for blank columns)
+        # Remove empty strings at the start/end from the split operation
+        raw_columns = [col.strip() for col in raw_header.split(DELIMITER)]
+        if raw_columns[0] == '':
+            raw_columns.pop(0)
+        if raw_columns[-1] == '':
+            raw_columns.pop(-1)
+        
+        # The cleaned header names are the raw column names stripped of extra control characters
+        # The original problem was from internal tool characters, not the surrounding 'þ'
+        header = [col.strip() for col in raw_columns]
+
+        # Process data rows
         parsed_data = []
-        for line in data_rows[1:]:
-            # Split by the delimiter
-            row_data = line.split(DELIMITER)
+        for line in data_lines[1:]:
+            # Split by delimiter, remove empty strings at the start/end from the split operation
+            row_values = [v.strip() for v in line.split(DELIMITER)]
+            if row_values[0] == '':
+                row_values.pop(0)
+            if row_values[-1] == '':
+                row_values.pop(-1)
             
-            # Clean up the elements: strip whitespace and filter empty strings
-            cleaned_row = [item.strip() for item in row_data if item.strip()]
+            # Pad or truncate to match the expected number of columns for robustness
+            if len(row_values) > len(header):
+                row_values = row_values[:len(header)]
+            elif len(row_values) < len(header):
+                row_values.extend([""] * (len(header) - len(row_values)))
             
-            # Pad the row with empty strings if it's shorter than the header
-            while len(cleaned_row) < len(header):
-                cleaned_row.append("")
-
-            # Truncate the row if it's longer than the header (handles stray delimiters at the end)
-            if len(cleaned_row) > len(header):
-                cleaned_row = cleaned_row[:len(header)]
-            
-            # Ensure the row has the exact number of columns as the header
-            if len(cleaned_row) == len(header):
+            if len(row_values) == len(header):
+                # Replace the problematic control character '\x14' with an empty string or strip it
+                cleaned_row = [v.replace('\x14', '').strip() for v in row_values]
                 parsed_data.append(cleaned_row)
 
         # Create the DataFrame
         df = pd.DataFrame(parsed_data, columns=header)
         
-        # Clean up column names (remove the 'þ' wrapping, if present)
-        df.columns = [col.strip(DELIMITER) for col in df.columns]
+        # Clean up column names (remove all remaining control characters or spaces)
+        df.columns = [c.replace('\x14', '').strip() for c in df.columns]
 
         return df
 
@@ -66,12 +94,12 @@ if uploaded_file is not None:
     if df is not None and not df.empty:
         st.success("File successfully parsed and loaded!")
         
-        # Convert columns to appropriate types where possible
+        # Convert 'Pages' column to numeric, coercing errors to an appropriate format
         if 'Pages' in df.columns:
-            # Attempt to convert 'Pages' column to numeric, coercing errors to NaN
+            # Errors='coerce' turns invalid parsing into NaN, fillna replaces NaN with 'N/A'
             df['Pages'] = pd.to_numeric(df['Pages'], errors='coerce').fillna('N/A').astype(object)
             
-        # Display the interactive table
+        # Display the interactive table, fixing the deprecation warning
         st.dataframe(df, use_container_width=True)
         
         # Offer option to download the clean table as a CSV
