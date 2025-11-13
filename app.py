@@ -2,108 +2,88 @@ import streamlit as st
 import pandas as pd
 from io import StringIO
 import re
+import csv
+import string
 
 # The delimiter used in your Bates file format
 DELIMITER = 'þ'
 
-# The definitive list of ALL 31 column headers, including those that are often empty.
-# We must include the "hidden" columns to maintain alignment for the actual data.
-DEFINITIVE_HEADERS = [
-    'Bates Begin', 
-    'Bates End', 
-    'Bates Begin Attach', 
-    'Bates End Attach', 
-    'Attachment Document', 
-    'Pages', 
-    'Author', 
-    'Custodian/Source', 
-    'Date Created', 
-    'Date Last Modified', 
-    'Date Received', 
-    'Date Sent', 
-    'Time Sent', 
-    'Document Extension', 
-    'Email BCC', 
-    'Email CC', 
-    'Email From', 
-    'Email Subject/Title', 
-    'Email To', 
-    'Original Filename', 
-    'File Size', 
-    'Original Folder Path', 
-    'MD5 Hash', 
-    'Parent Document ID', 
-    'Document Title', 
-    'Time Zone', 
-    'Text Link', 
-    'Native Link',
-    # Note: The original file actually had 28 columns visible in the metadata provided, 
-    # but sometimes the software outputs extra blank columns. Sticking to 28 based on the input text.
-]
-# However, the raw headers contained more columns and spaces between them.
-# After experimentation, forcing a consistent 28-column split and using the standard columns is the best bet.
-
-def parse_data_from_content(file_content):
-    """Parses the content line-by-line using the fixed header list."""
-    # Remove BOM and non-standard separator globally
-    file_content = file_content.lstrip('\ufeff').replace('\x14', '')
-    
-    # Use a cleaner representation of the data for line-by-line processing
-    lines = file_content.split('\n')
-    
-    # Find the start of the actual data rows
-    data_start_index = 0
-    for i, line in enumerate(lines):
-        if 'Native Link' in line:
-            data_start_index = i + 1
-            break
-            
-    # Process only the data lines
-    parsed_data = []
-    
-    for line in lines[data_start_index:]:
-        if not line.strip():
-            continue
-            
-        # Split every line by the delimiter 'þ', keeping empty strings for alignment
-        # The split operation produces ['', Col1, Col2, Col3, ''] 
-        row_values = [v.strip() for v in line.split(DELIMITER)]
-        
-        # Remove the mandatory empty strings that result from the leading and trailing delimiter
-        if row_values and row_values[0] == '':
-            row_values.pop(0)
-        if row_values and row_values[-1] == '':
-            row_values.pop(-1)
-
-        # Ensure the row has exactly the correct number of fields (28) by padding or trimming
-        expected_len = len(DEFINITIVE_HEADERS)
-        current_len = len(row_values)
-        
-        if current_len > expected_len:
-            row_values = row_values[:expected_len]
-        elif current_len < expected_len:
-            row_values.extend([""] * (expected_len - current_len))
-
-        if len(row_values) == expected_len:
-            parsed_data.append(row_values)
-            
-    # Create the DataFrame and enforce the correct column names for order
-    df = pd.DataFrame(parsed_data, columns=DEFINITIVE_HEADERS)
-    return df
+def generate_column_names(n):
+    """Generates column names A, B, C, ..., AA, AB, etc."""
+    names = []
+    for i in range(n):
+        name = ""
+        # Handle columns beyond Z (e.g., AA, AB)
+        while i >= 0:
+            name = string.ascii_uppercase[i % 26] + name
+            i = i // 26 - 1
+        names.append(name)
+    return names
 
 def clean_and_load_data(uploaded_file):
+    """
+    Reads the file line-by-line, uses the csv module to split, 
+    and determines the column headers based on the largest row width encountered.
+    """
     try:
+        # 1. Read and prepare content
         file_content = uploaded_file.getvalue().decode('utf-8')
-        df = parse_data_from_content(file_content)
         
-        # Data Cleaning for Presentation
-        if 'Pages' in df.columns:
-            # Convert 'Pages' to numeric, filling non-numeric with empty string
-            df['Pages'] = pd.to_numeric(df['Pages'], errors='coerce').fillna('').astype(object)
+        # Remove Byte Order Mark (BOM) and non-standard separator \x14 globally
+        file_content = file_content.lstrip('\ufeff').replace('\x14', '')
+        
+        lines = file_content.split('\n')
+        
+        # Find the start of the actual data rows by looking for the last line of the header
+        data_start_index = 0
+        for i, line in enumerate(lines):
+            if 'Native Link' in line:
+                data_start_index = i + 1
+                break
+        
+        # 2. Process Data Rows to determine maximum column width
+        raw_data_lines = lines[data_start_index:]
+        
+        max_cols = 0
+        all_data_rows = []
+        
+        # Use csv.reader for reliable splitting based on the delimiter
+        reader = csv.reader(raw_data_lines, delimiter=DELIMITER)
+        
+        for row_values in reader:
+            if not row_values:
+                continue
+                
+            # Filter empty strings at the start/end of the list that result from the leading/trailing delimiter
+            cleaned_row = [v.strip() for v in row_values]
             
-        # Drop columns that are entirely empty across all rows 
-        # (This is safe now that alignment is fixed)
-        df = df.dropna(axis=1, how='all')
+            if cleaned_row and cleaned_row[0] == '':
+                cleaned_row.pop(0)
+            if cleaned_row and cleaned_row[-1] == '':
+                cleaned_row.pop(-1)
+            
+            row_len = len(cleaned_row)
+            
+            # Track the widest row to define all headers
+            if row_len > max_cols:
+                max_cols = row_len
+                
+            all_data_rows.append(cleaned_row)
+            
+        if max_cols == 0:
+            raise Exception("No columns detected or no data rows found.")
+
+        # 3. Standardize and pad all rows to the maximum width
+        for row in all_data_rows:
+            if len(row) < max_cols:
+                row.extend([""] * (max_cols - len(row)))
+            # Truncation is unnecessary if max_cols is the max detected length
+            
+        # 4. Create Generic Headers
+        generic_headers = generate_column_names(max_cols)
+
+        # 5. Create DataFrame
+        df = pd.DataFrame(all_data_rows, columns=generic_headers)
         
         return df
 
@@ -114,8 +94,8 @@ def clean_and_load_data(uploaded_file):
 # --- Streamlit UI ---
 st.set_page_config(layout="wide")
 
-st.title("📂 Bates File Viewer")
-st.markdown("Upload your structured Bates `.dat` file to convert the metadata into a readable, searchable table.")
+st.title("📂 Bates File Viewer (Generic Headers)")
+st.markdown("This view uses simple letter headers to ensure maximum column alignment. Inspect columns carefully to see data relationships.")
 
 uploaded_file = st.file_uploader("Choose a .dat or delimited file", type=['dat', 'txt', 'csv'])
 
@@ -123,9 +103,15 @@ if uploaded_file is not None:
     df = clean_and_load_data(uploaded_file)
 
     if df is not None and not df.empty:
-        st.success("File successfully parsed and loaded! Columns should now be aligned correctly.")
+        st.success(f"File successfully parsed and loaded with {df.shape[1]} columns. Columns are aligned by delimiter position.")
         
-        # Display the interactive table, using the corrected 'width' parameter
+        # Data Cleaning for Presentation (No explicit 'Pages' column name needed)
+        
+        # Drop columns that are entirely empty across all rows 
+        # (Often necessary in Bates files to remove empty placeholder columns)
+        df = df.dropna(axis=1, how='all')
+
+        # Display the interactive table, using the correct 'width' parameter
         st.dataframe(df, width='stretch')
         
         # Offer option to download the clean table as a CSV
@@ -133,7 +119,7 @@ if uploaded_file is not None:
         st.download_button(
             label="Download Clean Data as CSV",
             data=csv_data,
-            file_name='parsed_bates_data.csv',
+            file_name='parsed_bates_data_aligned.csv',
             mime='text/csv',
         )
     elif df is not None and df.empty:
