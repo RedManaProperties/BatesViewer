@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from io import StringIO
+import re  # 
 
 # The delimiter used in your Bates file format
 DELIMITER = 'þ'
@@ -29,7 +30,6 @@ DEFINITIVE_HEADERS = [
     'Email To', 
     'Original Filename', 
     'File Size', 
-    # This header spanned two lines in the original file source, which is why parsing broke
     'Original Folder Path', 
     'MD5 Hash', 
     'Parent Document ID', 
@@ -37,8 +37,6 @@ DEFINITIVE_HEADERS = [
     'Time Zone', 
     'Text Link', 
     'Native Link' 
-    # The actual file provided seems to have 28, 29 or 31 fields depending on parsing method
-    # Sticking to the most important metadata fields visible in the original text structure:
 ]
 
 def clean_and_load_data(uploaded_file):
@@ -56,56 +54,50 @@ def clean_and_load_data(uploaded_file):
         
         # Replace the multiple-space-separated delimiter pattern (þ...þ ... þ) 
         # with a simple single tab character for robust CSV reading.
-        # This regex replaces the pattern "þ[spaces]þ" with "TAB".
         cleaned_content = re.sub(r'þ\s*þ', '\t', file_content)
 
         # Remove the first/last delimiters and any trailing spaces/tabs
         cleaned_content = cleaned_content.strip(DELIMITER).strip()
 
         # 2. Re-read into pandas using the cleaned content and known headers
-        # We use a space as the delimiter since the original delimiter was removed.
-        # And let the parser split the rows by tabs created above.
         data = StringIO(cleaned_content)
         
+        # Manually parse the header from the first part of the original file content
+        header_raw_lines = [line.strip() for line in file_content.split('\n') if line.strip()][:3]
+        header_text = "".join(header_raw_lines)
+        header_text = header_text.replace('Original \nFolder Path', 'Original Folder Path')
+        
+        raw_header_parts = [p.strip() for p in header_text.split(DELIMITER)]
+        current_headers = [p for p in raw_header_parts if p and not p.isspace()]
+        
+        # Determine how many columns of data we need to extract from the cleaned content
+        expected_cols_to_read = len(current_headers)
+
+        # 3. Load data with pd.read_csv using a tab as separator
+        # We start reading data from the 4th line (index 3) since the header spanned multiple lines
+        # and we only provided the clean content that starts right after the header.
         df = pd.read_csv(
             data,
             sep='\t', 
             engine='python',
-            # Skip the header rows (first 3 lines in the source document)
+            # Skip the rows containing the original headers (index 0, 1, 2)
             skiprows=[0, 1, 2],
-            # Do not allow pandas to infer headers; we supply them later
             header=None,
-            # Handle empty lines that might still be present
             skip_blank_lines=True
         )
 
-        # 3. Assign the correct, pre-defined headers
-        # We need to manually check how many data columns we actually got
-        num_columns = df.shape[1]
+        # 4. Assign the correct, pre-defined headers and trim extraneous columns
         
-        # The true headers are located in the last few rows of the original file (rows 0, 1, 2).
-        # To simplify, we will manually define them and trim/expand to match the data length.
-        
-        # The definitive list based on 31 expected columns (including the 3 empty columns for attachments metadata)
-        master_headers = [
-            'Bates Begin', 'Bates End', 'Bates Begin Attach', 'Bates End Attach', 
-            'Attachment Document', 'Pages', 'Author', 'Custodian/Source', 
-            'Date Created', 'Date Last Modified', 'Date Received', 'Date Sent', 
-            'Time Sent', 'Document Extension', 'Email BCC', 'Email CC', 
-            'Email From', 'Email Subject/Title', 'Email To', 'Original Filename', 
-            'File Size', 'Original Folder Path', 'MD5 Hash', 'Parent Document ID', 
-            'Document Title', 'Time Zone', 'Text Link', 'Native Link', 
-            # Placeholders for any unexpected columns if present in data
-            'Col_29', 'Col_30', 'Col_31'
-        ]
+        # Only take data columns up to the number of columns found in the definitive list
+        df = df.iloc[:, :len(DEFINITIVE_HEADERS)]
+        df.columns = DEFINITIVE_HEADERS[:df.shape[1]]
 
-        # Use only the necessary headers, then rename them based on the best fit:
-        df.columns = master_headers[:num_columns]
-        
-        return df.iloc[:, :len(DEFINITIVE_HEADERS)] # Select only the definitive columns
+        return df
 
     except Exception as e:
-        st.error(f"Error processing file: {e}")
+        st.error(f"An unexpected error occurred during parsing: {e}")
+        # Optionally print full error for debugging in the console
+        # st.exception(e)
         return None
 
 # --- Streamlit UI ---
@@ -128,10 +120,10 @@ if uploaded_file is not None:
             # Convert 'Pages' to numeric, filling non-numeric with empty string
             df['Pages'] = pd.to_numeric(df['Pages'], errors='coerce').fillna('').astype(object)
             
-        # Drop columns that are empty (e.g., original empty attachment metadata fields)
+        # Drop columns that are entirely empty (common in Bates load files)
         df = df.dropna(axis=1, how='all')
 
-        # Display the interactive table, fixing the deprecation warning
+        # Display the interactive table, using the corrected 'width' parameter
         st.dataframe(df, width='stretch')
         
         # Offer option to download the clean table as a CSV
